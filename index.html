@@ -112,10 +112,6 @@
 (function () {
   'use strict';
 
-  const NAMES = ['rose_blush','rose_crimson','rose_ox','rose_black',
-                 'rose_violet','rose_white','rose_gold','rose_teal'];
-  // rarity: the common ones show up constantly, the strange ones are a small event
-  const WEIGHT = [22, 20, 14, 6, 10, 13, 9, 6];
 
   const cv = document.getElementById('c');
   const ctx = cv.getContext('2d', { alpha: true });
@@ -135,30 +131,119 @@
   size();
   addEventListener('resize', size);
 
-  const FALLBACK = ['#ee9eb8','#c41e3a','#80102a','#3e1a32','#8c54d2','#f2eeee','#e8b05c','#44a2a0'];
-  const imgs = [], okimg = [];
-  NAMES.forEach((n, i) => {
-    const im = new Image();
-    im.onload  = () => { okimg[i] = true; };
-    im.onerror = () => { okimg[i] = false; };
-    im.src = 'f/' + n + '.png';
-    imgs[i] = im;
-  });
-  // if the sprites never arrive, draw a rose instead of showing nothing
-  function drawFallback(k, sz) {
-    const c = FALLBACK[k];
-    for (let ring = 3; ring >= 1; ring--) {
-      const r = sz * 0.5 * (ring / 3);
-      ctx.beginPath();
-      for (let i = 0; i < 7; i++) {
-        const a = i * 6.283 / 7 + ring * 0.4;
-        ctx.ellipse(Math.cos(a) * r * .42, Math.sin(a) * r * .42, r * .46, r * .34, a, 0, 6.283);
-      }
-      ctx.fillStyle = c;
-      ctx.globalAlpha *= ring === 3 ? 1 : .85;
-      ctx.fill();
+  /* ============================================================
+     The roses are DRAWN, not loaded. Rendered once at startup into
+     offscreen canvases at the screen's real resolution, then blitted.
+     Gothic palette: nothing here is pastel.
+     ============================================================ */
+  const PALETTE = [
+    { base:[168, 18, 42], edge:[232, 84,102], deep:[ 58,  4, 16], glow:[210, 26, 58] }, // blood
+    { base:[116, 14, 34], edge:[184, 58, 74], deep:[ 40,  3, 12], glow:[150, 20, 44] }, // oxblood
+    { base:[ 40, 16, 34], edge:[112, 62,100], deep:[ 12,  4, 12], glow:[ 92, 34, 86] }, // black rose
+    { base:[ 76, 30, 82], edge:[148, 84,158], deep:[ 24,  8, 30], glow:[112, 42,126] }, // bruise
+    { base:[ 44, 34, 92], edge:[112,100,182], deep:[ 14, 10, 34], glow:[ 74, 60,158] }, // nightshade
+    { base:[214,204,206], edge:[255,252,250], deep:[128,116,122], glow:[226,214,218] }, // bone
+    { base:[166,104,124], edge:[226,170,184], deep:[ 82, 40, 56], glow:[196,120,146] }, // ash rose
+    { base:[168,126, 58], edge:[230,192,120], deep:[ 78, 52, 16], glow:[196,146, 62] }  // old gold
+  ];
+  const WEIGHT = [20, 17, 11, 12, 8, 12, 14, 6];
+
+  const LAYERS = [[.14,1.00,7,.00],[.13,.87,7,.47],[.11,.74,6,.19],[.10,.62,6,.71],
+                  [.09,.50,5,.31],[.08,.40,5,.83],[.07,.31,4,.13],[.06,.23,4,.57],
+                  [.05,.16,3,.27],[.04,.10,3,.72]];
+
+  const mix = (a, b, t) => [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t];
+  const rgb = (c, k, al) => 'rgba(' + Math.min(255, c[0]*k|0) + ',' + Math.min(255, c[1]*k|0) +
+                            ',' + Math.min(255, c[2]*k|0) + ',' + (al === undefined ? 1 : al) + ')';
+
+  // plump petal: wide rounded rim, narrow where it joins the heart
+  function petalPath(g, c, a, r0, r1, sp, bulge) {
+    const n = 30;
+    g.beginPath();
+    for (let i = 0; i <= n; i++) {
+      const t = i/n, ang = a - sp + 2*sp*t;
+      const r = r1 * (1 + bulge*Math.pow(Math.sin(Math.PI*t), .85))
+                   * (1 - .04*Math.pow(Math.abs(2*t-1), 3.2));
+      const x = c + r*Math.cos(ang), y = c + r*Math.sin(ang);
+      i ? g.lineTo(x, y) : g.moveTo(x, y);
     }
+    for (let i = n; i >= 0; i--) {
+      const t = i/n, ang = a - sp*.22 + 2*sp*.22*t;
+      g.lineTo(c + r0*Math.cos(ang), c + r0*Math.sin(ang));
+    }
+    g.closePath();
   }
+
+  function makeRose(pi, px) {
+    const p = PALETTE[pi];
+    const cvs = document.createElement('canvas');
+    cvs.width = cvs.height = px;
+    const g = cvs.getContext('2d');
+    const c = px/2, R = px*0.44;
+    let seed = pi*9781 + 17;
+    const rnd = () => (seed = (seed*1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+
+    // the light it gives off, before the flower itself
+    g.save();
+    g.globalAlpha = .42;
+    g.shadowColor = rgb(p.glow, 1);
+    g.shadowBlur = px*.085;
+    g.fillStyle = rgb(p.glow, 1, .5);
+    for (let k = 0; k < 7; k++) {
+      petalPath(g, c, k*6.283/7, R*.14, R, 3.6/7, .22);
+      g.fill();
+    }
+    g.restore();
+
+    for (let li = 0; li < LAYERS.length; li++) {
+      const L = LAYERS[li], t = li/(LAYERS.length-1), sp0 = 3.6/L[2];
+      const deepc = mix(p.base, p.deep, t*.70);
+      const tipc  = mix(mix(p.base, p.edge, .22 - t*.11), p.base, t*.40);
+      for (let k = 0; k < L[2]; k++) {
+        const a  = L[3]*6.283 + k*6.283/L[2] + (rnd()-.5)*.18;
+        const r0 = R*L[0], r1 = R*L[1]*(.95 + rnd()*.10);
+        const sp = sp0*(.93 + rnd()*.14);
+        const lit = .80 + .28*Math.max(0, Math.cos(a + .9));
+
+        g.save();
+        g.shadowColor = 'rgba(14,4,12,.50)';
+        g.shadowBlur = px*.015;
+        g.shadowOffsetY = px*.008;
+        petalPath(g, c, a, r0, r1, sp, .22 - .05*t);
+        const grd = g.createLinearGradient(c + r0*Math.cos(a), c + r0*Math.sin(a),
+                                           c + r1*Math.cos(a), c + r1*Math.sin(a));
+        grd.addColorStop(0, rgb(deepc, lit*.66));
+        grd.addColorStop(1, rgb(tipc, lit));
+        g.fillStyle = grd;
+        g.fill();
+        g.restore();
+
+        petalPath(g, c, a, r0, r1, sp, .22 - .05*t);
+        g.strokeStyle = rgb(p.edge, 1, .36);
+        g.lineWidth = Math.max(1, px*.0038);
+        g.stroke();
+      }
+    }
+
+    // a sheen falling from the upper left, clipped to the flower
+    g.save();
+    g.globalCompositeOperation = 'source-atop';
+    const sh = g.createRadialGradient(px*.35, px*.30, 0, px*.35, px*.30, px*.62);
+    sh.addColorStop(0, 'rgba(255,255,255,.16)');
+    sh.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = sh;
+    g.fillRect(0, 0, px, px);
+    g.restore();
+
+    g.beginPath();
+    g.arc(c, c, px*.019, 0, 6.283);
+    g.fillStyle = rgb(p.deep, .7);
+    g.fill();
+    return cvs;
+  }
+
+  const SPRITE = Math.min(400, Math.round(132 * Math.min(devicePixelRatio || 1, 3)));
+  const roses = PALETTE.map((_, i) => makeRose(i, SPRITE));
 
   const wTotal = WEIGHT.reduce((a, b) => a + b, 0);
   function pickKind() {
@@ -362,17 +447,14 @@
 
       if (f.y < -160) { flowers.splice(i, 1); continue; }
 
-      const im = imgs[f.kind];
-      const drawable = im && im.complete && im.naturalWidth > 0;
-      if (!drawable && okimg[f.kind] !== false) continue;   // still loading, wait
+      const im = roses[f.kind];
       const sz = f.size * f.s;
       ctx.save();
       ctx.translate(f.x, f.y);
       ctx.rotate(f.rot);
       ctx.globalAlpha = f.alpha * (0.34 + f.depth * 0.66);
       if (f.depth < .34 && ctx.filter !== undefined) ctx.filter = 'blur(1.6px)';
-      if (drawable) ctx.drawImage(im, -sz / 2, -sz / 2, sz, sz);
-      else drawFallback(f.kind, sz);
+      ctx.drawImage(im, -sz / 2, -sz / 2, sz, sz);
       ctx.restore();
     }
     ctx.filter = 'none';
