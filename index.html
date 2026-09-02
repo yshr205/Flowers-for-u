@@ -13,7 +13,10 @@
 <style>
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body {
-    margin: 0; height: 100%; overflow: hidden;
+    margin: 0;
+    height: 100%;
+    height: 100svh;              /* iPhone: % of an unknown height is not a height */
+    overflow: hidden;
     background: #0a0610; color: #f4eef7;
     font-family: 'Instrument Serif', Georgia, serif;
     user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
@@ -132,14 +135,30 @@
   size();
   addEventListener('resize', size);
 
-  const imgs = [];
-  let ready = 0;
+  const FALLBACK = ['#ee9eb8','#c41e3a','#80102a','#3e1a32','#8c54d2','#f2eeee','#e8b05c','#44a2a0'];
+  const imgs = [], okimg = [];
   NAMES.forEach((n, i) => {
     const im = new Image();
-    im.onload = () => { ready++; };
+    im.onload  = () => { okimg[i] = true; };
+    im.onerror = () => { okimg[i] = false; };
     im.src = 'f/' + n + '.png';
     imgs[i] = im;
   });
+  // if the sprites never arrive, draw a rose instead of showing nothing
+  function drawFallback(k, sz) {
+    const c = FALLBACK[k];
+    for (let ring = 3; ring >= 1; ring--) {
+      const r = sz * 0.5 * (ring / 3);
+      ctx.beginPath();
+      for (let i = 0; i < 7; i++) {
+        const a = i * 6.283 / 7 + ring * 0.4;
+        ctx.ellipse(Math.cos(a) * r * .42, Math.sin(a) * r * .42, r * .46, r * .34, a, 0, 6.283);
+      }
+      ctx.fillStyle = c;
+      ctx.globalAlpha *= ring === 3 ? 1 : .85;
+      ctx.fill();
+    }
+  }
 
   const wTotal = WEIGHT.reduce((a, b) => a + b, 0);
   function pickKind() {
@@ -171,7 +190,8 @@
       swayA: 0.25 + Math.random() * 0.7,
       swayF: 0.4 + Math.random() * 0.9,
       swayP: Math.random() * 6.28,
-      alpha: 0
+      alpha: 0,
+      dying: false
     };
     flowers.push(f);
     grown++;
@@ -213,15 +233,66 @@
     lastPt = p;
   }
 
-  let down = false;
-  function onDown(e) { begin(); down = true; const p = at(e); lastPt = p; spread(p, true); }
-  function onMove(e) { if (!down) return; e.preventDefault(); spread(at(e), false); }
-  function onUp() { down = false; lastPt = null; }
+  /* Input. Deliberately belt and braces: some mobile browsers (and every
+     in-app browser) handle Pointer Events badly once touch-action is none,
+     so touch and mouse are wired up independently and de-duplicated. */
+  let down = false, usingTouch = false, lastTouchAt = 0;
 
-  addEventListener('pointerdown', onDown, { passive: true });
-  addEventListener('pointermove', onMove, { passive: false });
-  addEventListener('pointerup', onUp, { passive: true });
-  addEventListener('pointercancel', onUp, { passive: true });
+  function press(p) {
+    begin();
+    down = true;
+    lastPt = p;
+    spread(p, true);
+  }
+  function drag(p) {
+    if (!down) { press(p); return; }     // never get stuck: a move with no press still works
+    spread(p, false);
+  }
+  function release() { down = false; lastPt = null; }
+
+  // ---- touch ----
+  function tStart(e) {
+    usingTouch = true; lastTouchAt = Date.now();
+    const t = e.touches && e.touches[0]; if (!t) return;
+    press({ x: t.clientX, y: t.clientY });
+  }
+  function tMove(e) {
+    usingTouch = true; lastTouchAt = Date.now();
+    const t = e.touches && e.touches[0]; if (!t) return;
+    if (e.cancelable) e.preventDefault();
+    drag({ x: t.clientX, y: t.clientY });
+  }
+  document.addEventListener('touchstart', tStart, { passive: true });
+  document.addEventListener('touchmove',  tMove,  { passive: false });
+  document.addEventListener('touchend',   release, { passive: true });
+  document.addEventListener('touchcancel', release, { passive: true });
+
+  // ---- pointer / mouse, ignored while a real touch is driving ----
+  const stale = () => Date.now() - lastTouchAt > 700;
+  function pDown(e) { if (usingTouch && !stale()) return; press({ x: e.clientX, y: e.clientY }); }
+  function pMove(e) {
+    if (usingTouch && !stale()) return;
+    if (!down) return;
+    drag({ x: e.clientX, y: e.clientY });
+  }
+  if (window.PointerEvent) {
+    document.addEventListener('pointerdown', pDown, { passive: true });
+    document.addEventListener('pointermove', pMove, { passive: true });
+    document.addEventListener('pointerup', release, { passive: true });
+    document.addEventListener('pointercancel', release, { passive: true });
+  } else {
+    document.addEventListener('mousedown', pDown, { passive: true });
+    document.addEventListener('mousemove', pMove, { passive: true });
+    document.addEventListener('mouseup', release, { passive: true });
+  }
+  // last resort: if nothing above ever fired, a plain click still blooms
+  document.addEventListener('click', e => {
+    if (e.target === clearEl) return;
+    if (Date.now() - lastSpawn < 400) return;
+    press({ x: e.clientX, y: e.clientY });
+    release();
+  });
+  addEventListener('blur', release);
 
   clearEl.addEventListener('click', e => {
     e.stopPropagation();
@@ -292,14 +363,16 @@
       if (f.y < -160) { flowers.splice(i, 1); continue; }
 
       const im = imgs[f.kind];
-      if (!im || !im.complete) continue;
+      const drawable = im && im.complete && im.naturalWidth > 0;
+      if (!drawable && okimg[f.kind] !== false) continue;   // still loading, wait
       const sz = f.size * f.s;
       ctx.save();
       ctx.translate(f.x, f.y);
       ctx.rotate(f.rot);
       ctx.globalAlpha = f.alpha * (0.34 + f.depth * 0.66);
-      if (f.depth < .34) ctx.filter = 'blur(1.6px)';        // the far ones sit back
-      ctx.drawImage(im, -sz / 2, -sz / 2, sz, sz);
+      if (f.depth < .34 && ctx.filter !== undefined) ctx.filter = 'blur(1.6px)';
+      if (drawable) ctx.drawImage(im, -sz / 2, -sz / 2, sz, sz);
+      else drawFallback(f.kind, sz);
       ctx.restore();
     }
     ctx.filter = 'none';
